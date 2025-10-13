@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>afr_planning</name>
+  <version>0.1.0</version>
+  <description>Custom A* planner and path follower for Autonomous Fire Risk Surveyor</description>
+  <maintainer email="saket@todo.todo">saket</maintainer>
+  <license>BSD-2-Clause</license>
+
+  <!-- Build system -->
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <!-- Core dependencies -->
+  <depend>rclpy</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2_ros</depend>
+
+  <!-- Runtime dependency (used in bringup.launch.py) -->
+  <exec_depend>twist_mux</exec_depend>
+
+  <!-- Testing tools (optional, can stay) -->
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
