@@ -91,26 +91,56 @@ class AStarPlanner(Node):
         return []
 
     # ---------- follower ----------
-    def control_step(self):
-        if not self.path_pts:
-            self.cmd_pub.publish(Twist()); return
-        pose = self.get_pose_in_map()
-        if pose is None:
-            self.cmd_pub.publish(Twist()); return
-        x,y,yaw=pose
-        target=self.path_pts[-1]
-        for p in self.path_pts:
-            if self.dist((x,y),p)>self.lookahead: target=p; break
-        dx,dy = target[0]-x, target[1]-y
-        ex =  math.cos(yaw)*dx + math.sin(yaw)*dy
-        ey = -math.sin(yaw)*dx + math.cos(yaw)*dy
-        heading_err = math.atan2(ey, ex)
-        v = max(0.0, min(self.v_max, self.k_v * math.hypot(ex, ey)))
-        w = max(-self.w_max, min(self.w_max, self.k_w * heading_err))
-        if self.dist((x,y), self.path_pts[-1]) < 0.2 and abs(heading_err) < 0.2:
-            self.cmd_pub.publish(Twist()); self.path_pts=[]; return
-        cmd=Twist(); cmd.linear.x=v; cmd.angular.z=w
-        self.cmd_pub.publish(cmd)
+def control_step(self):
+    # If no path is available, stop the robot by publishing a zero Twist
+    if not self.path_pts:
+        self.cmd_pub.publish(Twist())  # Stop
+        return
+
+    # Get the current pose of the robot (via TF)
+    pose = self.get_pose_in_map()
+    if pose is None:
+        self.cmd_pub.publish(Twist())  # Stop
+        return
+
+    x, y, yaw = pose  # Robot's current position and orientation
+
+    # Pick a target point from the path (based on lookahead)
+    target = self.path_pts[-1]
+    for p in self.path_pts:
+        if self.dist((x, y), p) > self.lookahead:
+            target = p
+            break
+
+    # Calculate the errors (dx, dy, heading)
+    dx = target[0] - x
+    dy = target[1] - y
+    ex = math.cos(yaw) * dx + math.sin(yaw) * dy  # Forward error
+    ey = -math.sin(yaw) * dx + math.cos(yaw) * dy  # Lateral error
+
+    # Calculate heading error (angle to target)
+    heading_err = math.atan2(ey, ex)
+
+    # Proportional control for forward speed (v), sideways (y), and rotational speed (w)
+    v = max(0.0, min(self.v_max, self.k_v * math.hypot(ex, ey)))  # linear speed
+    w = max(-self.w_max, min(self.w_max, self.k_w * heading_err))  # angular speed (turn rate)
+    
+    # Set sideways movement (right) and altitude control
+    cmd = Twist()
+    cmd.linear.x = v  # Forward speed
+    cmd.linear.y = 0.2  # Sideways movement (positive = right)
+    cmd.linear.z = 0.1  # Move up (altitude increase)
+    cmd.angular.z = w  # Rotate at the required speed
+
+    # If we are close enough to the goal, stop
+    if self.dist((x, y), self.path_pts[-1]) < 0.2 and abs(heading_err) < 0.2:
+        self.cmd_pub.publish(Twist())  # Stop
+        self.path_pts = []  # Clear the path once goal is reached
+        return
+
+    # Publish the velocity command (Twist message)
+    self.cmd_pub.publish(cmd)
+
 
     # ---------- utils ----------
     def get_pose_in_map(self):
