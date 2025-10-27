@@ -67,3 +67,68 @@
   ros_type_name: "sensor_msgs/msg/PointCloud2"
   gz_type_name: "ignition.msgs.PointCloudPacked"
   direction: GZ_TO_ROS
+
+# drone topics
+
+# Position of joints [ie. wheels] (published by ignition::gazebo::systems::JointStatePublisher)
+- ros_topic_name: '/drone/joint_states'
+  gz_topic_name: '/model/drone/joint_states'
+  ros_type_name: 'sensor_msgs/msg/JointState'
+  gz_type_name: 'ignition.msgs.Model'
+  direction: GZ_TO_ROS
+
+# # Odometry (published by ignition::gazebo::systems::OdometryPublisher)
+- ros_topic_name: '/drone/odometry'
+  gz_topic_name: '/model/drone/odometry'
+  ros_type_name: 'nav_msgs/msg/Odometry'
+  gz_type_name: 'ignition.msgs.Odometry'
+  direction: GZ_TO_ROS
+
+# Intertial Measurement Unit
+- ros_topic_name: '/drone/imu'
+  gz_topic_name: '/model/drone/imu'
+  ros_type_name: 'sensor_msgs/msg/Imu'
+  gz_type_name: 'ignition.msgs.IMU'
+  direction: GZ_TO_ROS
+
+# Command velocity
+- ros_topic_name: '/drone/cmd_vel'
+  gz_topic_name: '/model/drone/cmd_vel'
+  ros_type_name: 'geometry_msgs/msg/Twist'
+  gz_type_name: 'ignition.msgs.Twist'
+  direction: ROS_TO_GZ
+
+# Lidar: laserscan
+- ros_topic_name: "/drone/scan"
+  gz_topic_name: "/model/drone/scan"
+  ros_type_name: "sensor_msgs/msg/LaserScan"
+  gz_type_name: "gz.msgs.LaserScan"
+  direction: GZ_TO_ROS
+
+# Lidar: pointcloud
+- ros_topic_name: "/drone/scan/points"
+  gz_topic_name: "/model/drone/scan/points"
+  ros_type_name: "sensor_msgs/msg/PointCloud2"
+  gz_type_name: "gz.msgs.PointCloudPacked"
+  direction: GZ_TO_ROS
+
+# Camera: RGB
+- ros_topic_name: "/drone/camera/image"
+  gz_topic_name: "/model/drone/camera/image"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "ignition.msgs.Image"
+  direction: GZ_TO_ROS
+
+# Camera: depth
+- ros_topic_name: "/drone/camera/depth/image"
+  gz_topic_name: "/model/drone/camera/depth_image"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "ignition.msgs.Image"
+  direction: GZ_TO_ROS
+
+# Camera: depth pointcloud
+- ros_topic_name: "/drone/camera/depth/points"
+  gz_topic_name: "/model/drone/camera/points"
+  ros_type_name: "sensor_msgs/msg/PointCloud2"
+  gz_type_name: "ignition.msgs.PointCloudPacked"
+  direction: GZ_TO_ROS

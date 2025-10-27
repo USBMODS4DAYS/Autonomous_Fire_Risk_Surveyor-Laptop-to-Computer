@@ -104,14 +104,6 @@
     </plugin>
   </gazebo>
 
-  <!-- Lidar and cameras use the general Sensors plugin -->
-  <gazebo>
-    <plugin
-        filename="libignition-gazebo-sensors-system.so"
-        name="ignition::gazebo::systems::Sensors">
-    </plugin>
-  </gazebo>
-
   <gazebo reference="base_scan">
     <material>Gazebo/FlatBlack</material>
     <sensor type="gpu_lidar" name="lidar">
@@ -173,7 +165,7 @@
       <always_on>1</always_on>
       <update_rate>3</update_rate> <!--10-->
       <visualize>$(arg camera_visual)</visualize>
-      <topic>/model/husky/camera</topic>
+      <topic>model/husky/camera</topic>
       <gz_frame_id>camera_link</gz_frame_id>
     </sensor>
   </gazebo>
