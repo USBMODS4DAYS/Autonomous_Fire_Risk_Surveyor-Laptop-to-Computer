@@ -38,40 +38,65 @@ def generate_launch_description():
     )
     ld.add_action(nav2_launch_arg)
 
-    # Load Husky robot description and state publisher (with namespace)
+        # Husky robot_state_publisher
     husky_description_content = ParameterValue(
         Command(['xacro ',
                  PathJoinSubstitution([pkg_path, 'urdf', 'husky.urdf.xacro'])]),
         value_type=str)
-    husky_state_pub = Node(package='robot_state_publisher',
-                           executable='robot_state_publisher',
-                           namespace='husky',  # Added namespace
-                           parameters=[{'robot_description': husky_description_content,
-                                        'use_sim_time': use_sim_time}])
+    husky_state_pub = Node(
+        package='robot_state_publisher',
+        executable='robot_state_publisher',
+        namespace='husky',
+        parameters=[{
+            'robot_description': husky_description_content,
+            'use_sim_time': use_sim_time
+        }]
+    )
     ld.add_action(husky_state_pub)
 
-    # Load Drone (Parrot) robot description and state publisher (with namespace)
+    # Drone robot_state_publisher
     drone_description_content = ParameterValue(
         Command(['xacro ',
-                 PathJoinSubstitution([pkg_path, 'urdf_drone', 'parrot.urdf.xacro'])]),
+                 PathJoinSubstitution([pkg_path,'urdf_drone','parrot.urdf.xacro'])]),
         value_type=str)
-    drone_state_pub = Node(package='robot_state_publisher',
-                           executable='robot_state_publisher',
-                           namespace='drone',  # Added namespace
-                           parameters=[{'robot_description': drone_description_content,
-                                        'use_sim_time': use_sim_time}])
+    drone_state_pub = Node(
+        package='robot_state_publisher',
+        executable='robot_state_publisher',
+        namespace='drone',
+        parameters=[{
+            'robot_description': drone_description_content,
+            'use_sim_time': use_sim_time
+        }]
+    )
     ld.add_action(drone_state_pub)
 
-    # Publish odom -> base_link transform using robot_localization
-    robot_localization_node = Node(
+    # EKF for Husky (global frames map/odom/base_link)
+    husky_ekf = Node(
         package='robot_localization',
         executable='ekf_node',
         name='robot_localization',
         output='screen',
-        parameters=[PathJoinSubstitution([config_path, 'robot_localization.yaml']),
-                    {'use_sim_time': use_sim_time}]
+        parameters=[
+            PathJoinSubstitution([config_path, 'robot_localization.yaml']),
+            {'use_sim_time': use_sim_time}
+        ]
     )
-    ld.add_action(robot_localization_node)
+    ld.add_action(husky_ekf)
+
+    # EKF for Drone (namespaced frames drone/map, drone/odom, drone/base_link)
+    drone_ekf = Node(
+        package='robot_localization',
+        executable='ekf_node',
+        namespace='drone',
+        name='robot_localization',
+        output='screen',
+        parameters=[
+            PathJoinSubstitution([config_path, 'robot_localization_drone.yaml']),
+            {'use_sim_time': use_sim_time}
+        ]
+    )
+    ld.add_action(drone_ekf)
+
 
     # Start Gazebo to simulate the robots in the chosen world
     world_launch_arg = DeclareLaunchArgument(

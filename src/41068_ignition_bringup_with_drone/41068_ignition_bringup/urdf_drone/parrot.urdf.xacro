@@ -1,52 +1,68 @@
 <?xml version="1.0" ?>
 <robot name="parrot" xmlns:xacro="http://ros.org/wiki/xacro">
+
+  <!-- includes -->
   <xacro:include filename="$(find 41068_ignition_bringup)/urdf_drone/common_properties.urdf.xacro"/>
   <xacro:include filename="$(find 41068_ignition_bringup)/urdf_drone/parrot.gazebo.xacro"/>
 
+  <!-- camera offset props -->
   <xacro:property name="r200_cam_rgb_px" value="0.005"/>
   <xacro:property name="r200_cam_rgb_py" value="0.018"/>
   <xacro:property name="r200_cam_rgb_pz" value="0.013"/>
   <xacro:property name="r200_cam_depth_offset" value="0.01"/>
 
+  <!-- =========================
+       TOP-LEVEL TF SHIM FRAMES
+       ========================= -->
 
-  <!-- Main link -->
+  <!-- This is the drone's nav frame that controllers will use -->
+  <link name="drone/base_link"/>
+  <joint name="drone_base_link_joint" type="fixed">
+    <parent link="drone/base_link"/>
+    <child link="drone_base_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- =====================
+       PHYSICAL DRONE BODY
+       ===================== -->
+
   <link name="drone_base_link">
     <inertial>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <mass value="0.503"/> <!-- kg -->
+      <mass value="0.503"/>
       <inertia ixx="1.805e-3" ixy="-8.619e-7" ixz="1.555e-5"
                iyy="1.764e-3" iyz="3.595e-7"
                izz="3.328e-3" />
     </inertial>
-<!--     <collision name="collision">
-      <origin xyz="-0.00424 0.00014 -0.00595" rpy="0 0 0"/>
-      <geometry>
-        <box size="0.5 0.5 0.2"/>
-      </geometry>
-    </collision> -->
+
     <visual name="drone_hull">
       <geometry>
         <mesh filename="file://$(find 41068_ignition_bringup)/urdf_drone/meshes/hull.dae"/>
       </geometry>
     </visual>
+
     <visual name="drone_propeller_rr">
       <origin xyz="-0.09035 -0.11423 -0.00501" rpy="0 0 0"/>
       <geometry>
         <mesh filename="file://$(find 41068_ignition_bringup)/urdf_drone/meshes/propeller_rr.dae"/>
       </geometry>
     </visual>
+
     <visual name="drone_propeller_rl">
       <origin xyz="0.09035 0.11452 -0.00501" rpy="0 0 0"/>
       <geometry>
         <mesh filename="file://$(find 41068_ignition_bringup)/urdf_drone/meshes/propeller_rl.dae"/>
       </geometry>
     </visual>
+
     <visual name="drone_propeller_fr">
       <origin xyz="0.08456 -0.11435 -0.00501" rpy="0 0 0"/>
       <geometry>
         <mesh filename="file://$(find 41068_ignition_bringup)/urdf_drone/meshes/propeller_fr.dae"/>
       </geometry>
     </visual>
+
     <visual name="drone_propeller_fl">
       <origin xyz="0.08456 0.11463 -0.00501" rpy="0 0 0"/>
       <geometry>
@@ -55,15 +71,15 @@
     </visual>
   </link>
 
-
+  <!-- IMU -->
   <joint name="drone_imu_joint" type="fixed">
     <parent link="drone_base_link"/>
     <child link="drone_imu_link"/>
     <origin xyz="0.0 0 0.068" rpy="0 0 0"/>
   </joint>
-
   <link name="drone_imu_link"/>
 
+  <!-- Lidar -->
   <joint name="drone_scan_joint" type="fixed">
     <parent link="drone_base_link"/>
     <child link="drone_base_scan"/>
@@ -80,30 +96,31 @@
     </visual>
 
     <inertial>
-      <mass value="0" />
-      <origin xyz="0 0 0" />
+      <mass value="0"/>
+      <origin xyz="0 0 0"/>
       <inertia ixx="0.001" ixy="0.0" ixz="0.0"
                iyy="0.001" iyz="0.0"
-               izz="0.001" />
+               izz="0.001"/>
     </inertial>
   </link>
 
+  <!-- Camera body -->
   <joint name="drone_camera_joint" type="fixed">
-    <origin xyz="0.25 0.0 0.25" rpy="0 0.785398 0"/> <!-- 0.5 0.0 0.9 -->
+    <origin xyz="0.25 0.0 0.25" rpy="0 0.785398 0"/>
     <parent link="drone_base_link"/>
     <child link="drone_camera_link"/>
   </joint>
 
   <link name="drone_camera_link">
     <visual>
-     <origin xyz="0 0 0" rpy="0 0 0"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
         <box size="0.02 0.08 0.05"/>
       </geometry>
       <material name="dark"/>
     </visual>
     <visual>
-     <origin xyz="0.015 0 0" rpy="0 1.57 0"/>
+      <origin xyz="0.015 0 0" rpy="0 1.57 0"/>
       <geometry>
         <cylinder length="0.03" radius="0.02"/>
       </geometry>
@@ -111,6 +128,7 @@
     </visual>
   </link>
 
+  <!-- RGB camera chain -->
   <joint name="drone_camera_rgb_joint" type="fixed">
     <origin xyz="${r200_cam_rgb_px} ${r200_cam_rgb_py} ${r200_cam_rgb_pz}" rpy="0 0 0"/>
     <parent link="drone_camera_link"/>
@@ -125,6 +143,7 @@
   </joint>
   <link name="drone_camera_rgb_optical_frame"/>
 
+  <!-- Depth camera chain -->
   <joint name="drone_camera_depth_joint" type="fixed">
     <origin xyz="${r200_cam_rgb_px} ${r200_cam_rgb_py + r200_cam_depth_offset} ${r200_cam_rgb_pz}" rpy="0 0 0"/>
     <parent link="drone_camera_link"/>

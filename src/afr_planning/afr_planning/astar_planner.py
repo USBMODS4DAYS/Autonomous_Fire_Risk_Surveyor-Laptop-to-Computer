@@ -14,13 +14,25 @@ FREE, OCC, UNKNOWN = 0, 100, -1
 class AStarPlanner(Node):
     def __init__(self):
         super().__init__('astar_planner')
-        self.map_sub = self.create_subscription(OccupancyGrid, '/map', self.on_map, 10)
-        self.goal_sub = self.create_subscription(PoseStamped, '/goal_pose', self.on_goal, 10)
-        self.path_pub = self.create_publisher(Path, '/plan', 10)
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel_nav', 10)
+
+        # configurable frames (so we can run this for /drone or /husky)
+        self.declare_parameter('map_frame', 'map')
+        self.declare_parameter('base_link_frame', 'base_link')
+
+        self.map_frame = self.get_parameter('map_frame').get_parameter_value().string_value
+        self.base_link_frame = self.get_parameter('base_link_frame').get_parameter_value().string_value
+
+        # NOTE: topics are *relative*, no leading slash
+        # when we launch this node in namespace 'drone', these become /drone/map etc.
+        self.map_sub = self.create_subscription(OccupancyGrid, 'map', self.on_map, 10)
+        self.goal_sub = self.create_subscription(PoseStamped, 'goal_pose', self.on_goal, 10)
+
+        self.path_pub = self.create_publisher(Path, 'plan', 10)
+        self.cmd_pub = self.create_publisher(Twist, 'cmd_vel_nav', 10)
 
         self.tf_buffer = Buffer(cache_time=Duration(seconds=5.0))
         self.tf_listener = TransformListener(self.tf_buffer, self)
+
         self.timer = self.create_timer(0.05, self.control_step)  # 20 Hz
 
         self.map = None
@@ -28,20 +40,20 @@ class AStarPlanner(Node):
         self.goal = None
         self.path_pts = []
 
-        # follower parameters
+        # motion tuning
         self.v_max, self.w_max = 0.25, 0.6
         self.k_v, self.k_w = 0.6, 0.9
         self.lookahead = 0.4
 
-        # stabilisation parameters
+        # smoothing
         self.STRAFE_ENABLED = True
         self.ex_f = 0.0
         self.ey_f = 0.0
         self.alpha = 0.5  # low-pass filter coefficient
 
-        self.get_logger().info('A* planner ready — click a 2D Goal Pose in RViz.')
+        self.get_logger().info('A* planner ready — click a 2D Goal Pose.')
 
-    # ---------- map + goal callbacks ----------
+    # ---------------- map + goal callbacks ----------------
     def on_map(self, msg: OccupancyGrid):
         self.map_info = msg.info
         self.map = np.asarray(msg.data, dtype=np.int16).reshape(msg.info.height, msg.info.width)
@@ -51,7 +63,7 @@ class AStarPlanner(Node):
         self.get_logger().info(f'New goal: {self.goal}')
         self.plan_path()
 
-    # ---------- path planning ----------
+    # ---------------- path planning ----------------
     def plan_path(self):
         if self.map is None or self.map_info is None:
             self.get_logger().warn('No map yet')
@@ -59,7 +71,7 @@ class AStarPlanner(Node):
 
         start = self.get_pose_in_map()
         if start is None:
-            self.get_logger().warn('No TF map→base_link yet')
+            self.get_logger().warn('No TF yet')
             return
 
         sx, sy, _ = start
@@ -72,7 +84,8 @@ class AStarPlanner(Node):
             return
 
         grid_free = self.inflate_obstacles(
-            self.map, radius_cells=max(1, int(0.25 / self.map_info.resolution))
+            self.map,
+            radius_cells=max(1, int(0.25 / self.map_info.resolution))
         )
         path_cells = self.astar(grid_free, s_g, g_g)
         if not path_cells:
@@ -132,9 +145,8 @@ class AStarPlanner(Node):
                     heappush(openset, (tentative + h(ny, nx), (ny, nx)))
         return []
 
-    # ---------- holonomic control ----------
+    # ---------------- holonomic controller ----------------
     def control_step(self):
-        # No path? stop.
         if not self.path_pts:
             self.cmd_pub.publish(Twist())
             return
@@ -146,11 +158,9 @@ class AStarPlanner(Node):
 
         x, y, yaw = pose
 
-        # ----- select target point -----
         final = self.path_pts[-1]
         dist_goal = self.dist((x, y), final)
 
-        # scale numbers from map resolution
         cell = self.map_info.resolution
         capture_R  = max(0.40, 3 * cell)
         approach_R = max(0.80, 8 * cell)
@@ -164,34 +174,31 @@ class AStarPlanner(Node):
         else:
             target = final
 
-        # ----- errors in body frame -----
         dx = target[0] - x
         dy = target[1] - y
         ex =  math.cos(yaw) * dx + math.sin(yaw) * dy
         ey = -math.sin(yaw) * dx + math.cos(yaw) * dy
 
-        # low-pass filter to avoid twitch
+        # low-pass on body-frame error
         self.ex_f = self.alpha * ex + (1.0 - self.alpha) * self.ex_f
         self.ey_f = self.alpha * ey + (1.0 - self.alpha) * self.ey_f
         ex, ey = self.ex_f, self.ey_f
 
         heading_err = math.atan2(ey, ex)
 
-        # deadbands
         dead_xy = max(0.08, 1.5 * cell)
         if abs(ex) < dead_xy:
             ex = 0.0
         if abs(ey) < dead_xy:
             ey = 0.0
 
-        # distance-based taper (brake as we get close)
         taper_R = 1.2
         scale   = max(0.0, min(1.0, dist_goal / taper_R))
 
         cmd = Twist()
 
         if self.STRAFE_ENABLED:
-            k_pos_far = 0.8
+            k_pos_far  = 0.8
             k_pos_near = 0.5
 
             if dist_goal > approach_R:
@@ -206,21 +213,16 @@ class AStarPlanner(Node):
             vx = kpos * ex * scale
             vy = kpos * ey * scale
 
-            # clamps
             vx = max(-self.v_max, min(self.v_max, vx))
             vy = max(-self.v_max, min(self.v_max, vy))
             wz = max(-self.w_max, min(self.w_max, wz))
 
-            # small command suppression
-            if abs(vx) < 0.03:
-                vx = 0.0
-            if abs(vy) < 0.03:
-                vy = 0.0
-            if abs(wz) < 0.03:
-                wz = 0.0
+            if abs(vx) < 0.03: vx = 0.0
+            if abs(vy) < 0.03: vy = 0.0
+            if abs(wz) < 0.03: wz = 0.0
 
-            cmd.linear.x = vx
-            cmd.linear.y = vy
+            cmd.linear.x  = vx
+            cmd.linear.y  = vy
             cmd.angular.z = wz
         else:
             theta_spin = 1.0
@@ -229,15 +231,16 @@ class AStarPlanner(Node):
                 w = max(-self.w_max, min(self.w_max, self.k_w * heading_err))
             else:
                 v = max(0.0, min(self.v_max, self.k_v * ex * scale))
-                w = max(-self.w_max, min(self.w_max, 0.6 * self.k_w * heading_err * max(0.2, scale)))
-            if abs(v) < 0.03:
-                v = 0.0
-            if abs(w) < 0.03:
-                w = 0.0
-            cmd.linear.x = v
+                w = max(-self.w_max, min(self.w_max,
+                                         0.6 * self.k_w * heading_err * max(0.2, scale)))
+
+            if abs(v) < 0.03: v = 0.0
+            if abs(w) < 0.03: w = 0.0
+
+            cmd.linear.x  = v
             cmd.angular.z = w
 
-        # ----- capture -----
+        # goal capture
         if dist_goal < capture_R:
             self.cmd_pub.publish(Twist())
             self.path_pts = []
@@ -245,10 +248,14 @@ class AStarPlanner(Node):
 
         self.cmd_pub.publish(cmd)
 
-    # ---------- utilities ----------
+    # ---------------- utils ----------------
     def get_pose_in_map(self):
         try:
-            tf = self.tf_buffer.lookup_transform('map', 'base_link', rclpy.time.Time())
+            tf = self.tf_buffer.lookup_transform(
+                self.map_frame,
+                self.base_link_frame,
+                rclpy.time.Time()
+            )
             x = tf.transform.translation.x
             y = tf.transform.translation.y
             q = tf.transform.rotation
@@ -262,7 +269,10 @@ class AStarPlanner(Node):
 
     def publish_path(self, pts):
         path = Path()
-        path.header = Header(frame_id='map', stamp=self.get_clock().now().to_msg())
+        path.header = Header(
+            frame_id=self.map_frame,
+            stamp=self.get_clock().now().to_msg()
+        )
         for (wx, wy) in pts:
             ps = PoseStamped()
             ps.header = path.header
@@ -273,13 +283,13 @@ class AStarPlanner(Node):
         self.path_pub.publish(path)
 
     def world_to_grid(self, wx, wy):
-        r = self.map_info.resolution
+        r  = self.map_info.resolution
         ox = self.map_info.origin.position.x
         oy = self.map_info.origin.position.y
         return int((wx - ox) / r), int((wy - oy) / r)
 
     def grid_to_world(self, gx, gy):
-        r = self.map_info.resolution
+        r  = self.map_info.resolution
         ox = self.map_info.origin.position.x
         oy = self.map_info.origin.position.y
         return ox + (gx + 0.5) * r, oy + (gy + 0.5) * r
@@ -288,7 +298,7 @@ class AStarPlanner(Node):
         return 0 <= gx < self.map_info.width and 0 <= gy < self.map_info.height
 
     def inflate_obstacles(self, raw_grid, radius_cells=3):
-        occ = (raw_grid == OCC) | (raw_grid == UNKNOWN)
+        occ = (raw_grid == 100) | (raw_grid == -1)
         H, W = occ.shape
         dil = occ.copy()
         r = radius_cells

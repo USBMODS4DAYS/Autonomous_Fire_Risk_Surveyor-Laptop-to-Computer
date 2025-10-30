@@ -1,0 +1,35 @@
+/drone/robot_localization:
+  ros__parameters:
+    frequency: 30.0
+    two_d_mode: true
+    publish_acceleration: false
+
+    # Let this EKF publish TF for the drone only
+    publish_tf: true
+
+    # Drone-local frames
+    map_frame: drone/map
+    odom_frame: drone/odom
+    world_frame: drone/odom
+    base_link_frame: drone_base_link
+
+    # 1) Fuse Gazebo odom so EKF can initialize pose + twist
+    odom0: /drone/odometry
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  true,  false,
+                   false, false, true,
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+
+    # 2) Fuse IMU yaw for heading stabilization
+    imu0: /drone/imu
+    imu0_config: [false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, true,
+                  false, false, false]
+    imu0_differential: false
+    imu0_relative: false
+    imu0_remove_gravitational_acceleration: false
