@@ -10,19 +10,7 @@
   <xacro:property name="r200_cam_rgb_py" value="0.018"/>
   <xacro:property name="r200_cam_rgb_pz" value="0.013"/>
   <xacro:property name="r200_cam_depth_offset" value="0.01"/>
-
-  <!-- =========================
-       TOP-LEVEL TF SHIM FRAMES
-       ========================= -->
-
-  <!-- This is the drone's nav frame that controllers will use -->
-  <link name="drone/base_link"/>
-  <joint name="drone_base_link_joint" type="fixed">
-    <parent link="drone/base_link"/>
-    <child link="drone_base_link"/>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-  </joint>
-
+  
   <!-- =====================
        PHYSICAL DRONE BODY
        ===================== -->
