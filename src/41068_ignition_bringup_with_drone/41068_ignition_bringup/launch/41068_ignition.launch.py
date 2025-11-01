@@ -1,8 +1,8 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, GroupAction
 from launch.conditions import IfCondition
 from launch.substitutions import (Command, LaunchConfiguration, PathJoinSubstitution)
-from launch_ros.actions import Node
+from launch_ros.actions import Node, PushRosNamespace, SetParameter
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
@@ -15,7 +15,7 @@ def generate_launch_description():
     pkg_path = FindPackageShare('41068_ignition_bringup')
     config_path = PathJoinSubstitution([pkg_path, 'config'])
 
-    # Additional command line arguments
+    # --- Arguments ---
     use_sim_time_launch_arg = DeclareLaunchArgument(
         'use_sim_time',
         default_value='True',
@@ -23,7 +23,10 @@ def generate_launch_description():
     )
     use_sim_time = LaunchConfiguration('use_sim_time')
     ld.add_action(use_sim_time_launch_arg)
-    
+
+    # ✅ Global sim time parameter for all ROS2 nodes
+    ld.add_action(SetParameter(name='use_sim_time', value=use_sim_time))
+
     rviz_launch_arg = DeclareLaunchArgument(
         'rviz',
         default_value='False',
@@ -38,7 +41,7 @@ def generate_launch_description():
     )
     ld.add_action(nav2_launch_arg)
 
-        # Husky robot_state_publisher
+    # --- Husky robot_state_publisher ---
     husky_description_content = ParameterValue(
         Command(['xacro ',
                  PathJoinSubstitution([pkg_path, 'urdf', 'husky.urdf.xacro'])]),
@@ -48,42 +51,39 @@ def generate_launch_description():
         executable='robot_state_publisher',
         namespace='husky',
         parameters=[{
-            'robot_description': husky_description_content,
-            'use_sim_time': use_sim_time
+            'robot_description': husky_description_content
         }]
     )
     ld.add_action(husky_state_pub)
 
-    # Drone robot_state_publisher
+    # --- Drone robot_state_publisher ---
     drone_description_content = ParameterValue(
         Command(['xacro ',
-                 PathJoinSubstitution([pkg_path,'urdf_drone','parrot.urdf.xacro'])]),
+                 PathJoinSubstitution([pkg_path, 'urdf_drone', 'parrot.urdf.xacro'])]),
         value_type=str)
     drone_state_pub = Node(
         package='robot_state_publisher',
         executable='robot_state_publisher',
         namespace='drone',
         parameters=[{
-            'robot_description': drone_description_content,
-            'use_sim_time': use_sim_time
+            'robot_description': drone_description_content
         }]
     )
     ld.add_action(drone_state_pub)
 
-    # EKF for Husky (global frames map/odom/base_link)
+    # --- EKF for Husky ---
     husky_ekf = Node(
         package='robot_localization',
         executable='ekf_node',
         name='robot_localization',
         output='screen',
         parameters=[
-            PathJoinSubstitution([config_path, 'robot_localization.yaml']),
-            {'use_sim_time': use_sim_time}
+            PathJoinSubstitution([config_path, 'robot_localization.yaml'])
         ]
     )
     ld.add_action(husky_ekf)
 
-    # EKF for Drone (namespaced frames drone/map, drone/odom, drone/base_link)
+    # --- EKF for Drone ---
     drone_ekf = Node(
         package='robot_localization',
         executable='ekf_node',
@@ -91,14 +91,27 @@ def generate_launch_description():
         name='robot_localization',
         output='screen',
         parameters=[
-            PathJoinSubstitution([config_path, 'robot_localization_drone.yaml']),
-            {'use_sim_time': use_sim_time}
+            PathJoinSubstitution([config_path, 'robot_localization_drone.yaml'])
         ]
     )
     ld.add_action(drone_ekf)
 
+    # --- Drone SLAM (publishes drone/map -> drone/odom) ---
+    drone_slam = GroupAction([
+        PushRosNamespace('drone'),
+        Node(
+            package='slam_toolbox',
+            executable='async_slam_toolbox_node',
+            name='slam_toolbox',
+            output='screen',
+            parameters=[
+                PathJoinSubstitution([config_path, 'drone_slam_toolbox.yaml'])
+            ]
+        )
+    ])
+    ld.add_action(drone_slam)
 
-    # Start Gazebo to simulate the robots in the chosen world
+    # --- Gazebo world setup ---
     world_launch_arg = DeclareLaunchArgument(
         'world',
         default_value='simple_trees',
@@ -117,47 +130,45 @@ def generate_launch_description():
     )
     ld.add_action(gazebo)
 
-    # Spawn Husky robot in Gazebo (with namespace)
+    # --- Spawn Husky ---
     husky_spawner = Node(
         package='ros_ign_gazebo',
         executable='create',
         output='screen',
-        parameters=[{'use_sim_time': use_sim_time}],
-        arguments=['-topic', '/husky/robot_description', '-name', 'husky', '-x', '0.0', '-y', '0.0', '-z', '0.4']
+        arguments=['-topic', '/husky/robot_description',
+                   '-name', 'husky', '-x', '0.0', '-y', '0.0', '-z', '0.4']
     )
     ld.add_action(husky_spawner)
 
-    # Spawn Drone (Parrot) in Gazebo (with namespace)
+    # --- Spawn Drone ---
     drone_spawner = Node(
         package='ros_ign_gazebo',
         executable='create',
         output='screen',
-        parameters=[{'use_sim_time': use_sim_time}],
-        arguments=['-topic', '/drone/robot_description', '-name', 'drone', '-x', '2.0', '-y', '0.0', '-z', '2.0']
+        arguments=['-topic', '/drone/robot_description',
+                   '-name', 'drone', '-x', '2.0', '-y', '0.0', '-z', '2.0']
     )
     ld.add_action(drone_spawner)
 
-    # Bridge topics between Gazebo and ROS2
+    # --- Bridge topics ---
     gazebo_bridge = Node(
         package='ros_ign_bridge',
         executable='parameter_bridge',
-        parameters=[{'config_file': PathJoinSubstitution([config_path, 'gazebo_bridge.yaml']),
-                    'use_sim_time': use_sim_time}]
+        parameters=[{'config_file': PathJoinSubstitution([config_path, 'gazebo_bridge.yaml'])}]
     )
     ld.add_action(gazebo_bridge)
 
-    # RViz2 visualizes data
+    # --- RViz ---
     rviz_node = Node(
         package='rviz2',
         executable='rviz2',
         output='screen',
-        parameters=[{'use_sim_time': use_sim_time}],
         arguments=['-d', PathJoinSubstitution([config_path, '41068.rviz'])],
         condition=IfCondition(LaunchConfiguration('rviz'))
     )
     ld.add_action(rviz_node)
 
-    # Nav2 for Husky's waypoint following
+    # --- Nav2 (for Husky only) ---
     nav2 = IncludeLaunchDescription(
         PathJoinSubstitution([pkg_path, 'launch', '41068_navigation.launch.py']),
         launch_arguments={'use_sim_time': use_sim_time}.items(),
