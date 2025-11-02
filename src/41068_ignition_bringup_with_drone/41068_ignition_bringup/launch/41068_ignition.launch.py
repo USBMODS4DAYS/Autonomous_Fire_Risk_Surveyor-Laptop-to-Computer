@@ -106,10 +106,19 @@ def generate_launch_description():
             output='screen',
             parameters=[
                 PathJoinSubstitution([config_path, 'drone_slam_toolbox.yaml'])
+            ],
+            remappings=[
+                # Put the map topic & metadata under /drone/
+                ('/map', '/drone/map'),
+                ('/map_metadata', '/drone/map_metadata'),
+                # (optional) if you ever subscribe with relative names:
+                ('map', '/drone/map'),
+                ('map_metadata', '/drone/map_metadata'),
             ]
         )
     ])
     ld.add_action(drone_slam)
+
 
     # --- Gazebo world setup ---
     world_launch_arg = DeclareLaunchArgument(

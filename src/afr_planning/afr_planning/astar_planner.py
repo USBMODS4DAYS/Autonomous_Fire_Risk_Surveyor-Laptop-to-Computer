@@ -1,338 +1,342 @@
-import math
-import numpy as np
+#!/usr/bin/env python3
+import math, heapq
+from typing import List, Tuple, Optional
 import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
+from geometry_msgs.msg import PoseStamped, Point
 from nav_msgs.msg import OccupancyGrid, Path
-from geometry_msgs.msg import PoseStamped, Twist
-from std_msgs.msg import Header
-from tf2_ros import Buffer, TransformListener, LookupException, ConnectivityException, ExtrapolationException
+from visualization_msgs.msg import Marker
+from tf2_ros import Buffer, TransformListener, LookupException, ExtrapolationException, ConnectivityException
+from collections import deque
 
-FREE, OCC, UNKNOWN = 0, 100, -1
+def heuristic(a: Tuple[int,int], b: Tuple[int,int]) -> float:
+    return math.hypot(a[0]-b[0], a[1]-b[1])
 
+def neighbors_8(i: int, j: int):
+    rt2 = math.sqrt(2.0)
+    return [(i-1,j-1,rt2),(i-1,j,1.0),(i-1,j+1,rt2),
+            (i,  j-1,1.0),             (i,  j+1,1.0),
+            (i+1,j-1,rt2),(i+1,j,1.0),(i+1,j+1,rt2)]
 
 class AStarPlanner(Node):
     def __init__(self):
         super().__init__('astar_planner')
 
-        # configurable frames (so we can run this for /drone or /husky)
-        self.declare_parameter('map_frame', 'map')
-        self.declare_parameter('base_link_frame', 'base_link')
+        # Frames / topics
+        self.fixed_frame = 'drone/map'
+        self.base_link   = 'drone_base_link'
+        self.map_topic   = '/map'          # slam_toolbox publishes /map (frame_id = drone/map)
+        self.goal_topic  = '/drone/goal'
 
-        self.map_frame = self.get_parameter('map_frame').get_parameter_value().string_value
-        self.base_link_frame = self.get_parameter('base_link_frame').get_parameter_value().string_value
+        # Params
+        self.declare_parameter('occ_threshold', 50)
+        self.declare_parameter('inflate_radius', 0.0)           # m
+        self.declare_parameter('plan_rate_hz', 1.0)
+        self.declare_parameter('unknown_policy', 'blocked')      # 'blocked' | 'free' | 'penalized'
+        self.declare_parameter('unknown_penalty', 2.0)           # extra cost per unknown step (if penalized)
+        self.declare_parameter('snap_goal_radius_m', 0.6)        # search radius to snap goal to nearest free
+        self.declare_parameter('inflate_ignore_unknown', True)   # ignore unknown for inflation
 
-        # NOTE: topics are *relative*, no leading slash
-        # when we launch this node in namespace 'drone', these become /drone/map etc.
-        self.map_sub = self.create_subscription(OccupancyGrid, 'map', self.on_map, 10)
-        self.goal_sub = self.create_subscription(PoseStamped, 'goal_pose', self.on_goal, 10)
+        self.occ_threshold         = int(self.get_parameter('occ_threshold').value)
+        self.inflate_radius        = float(self.get_parameter('inflate_radius').value)
+        self.plan_period           = 1.0/float(self.get_parameter('plan_rate_hz').value)
+        self.unknown_policy        = str(self.get_parameter('unknown_policy').value)
+        self.unknown_penalty       = float(self.get_parameter('unknown_penalty').value)
+        self.snap_goal_radius_m    = float(self.get_parameter('snap_goal_radius_m').value)
+        self.inflate_ignore_unknown= bool(self.get_parameter('inflate_ignore_unknown').value)
 
-        self.path_pub = self.create_publisher(Path, 'plan', 10)
-        self.cmd_pub = self.create_publisher(Twist, 'cmd_vel_nav', 10)
-
-        self.tf_buffer = Buffer(cache_time=Duration(seconds=5.0))
+        # TF
+        self.tf_buffer = Buffer(cache_time=Duration(seconds=10.0))
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        self.timer = self.create_timer(0.05, self.control_step)  # 20 Hz
+        # IO
+        self.map_sub = self.create_subscription(OccupancyGrid, self.map_topic, self._on_map, 5)
+        self.goal_sub = self.create_subscription(PoseStamped, self.goal_topic, self._on_goal, 5)
+        self.path_pub        = self.create_publisher(Path,   '/drone/astar_path',    10)
+        self.path_marker_pub = self.create_publisher(Marker, '/drone/astar_markers', 10)
+        self.goal_marker_pub = self.create_publisher(Marker, '/drone/goal_marker',   10)
 
-        self.map = None
-        self.map_info = None
-        self.goal = None
-        self.path_pts = []
+        # State
+        self.map_msg: Optional[OccupancyGrid] = None
+        self.goal_xy_world: Optional[Tuple[float,float]] = None
+        self.logged_map_header = False
 
-        # motion tuning
-        self.v_max, self.w_max = 0.25, 0.6
-        self.k_v, self.k_w = 0.6, 0.9
-        self.lookahead = 0.4
+        self.create_timer(self.plan_period, self._try_plan)
+        self.get_logger().info("A* ready. Publish PoseStamped to /drone/goal with frame_id=drone/map.")
 
-        # smoothing
-        self.STRAFE_ENABLED = True
-        self.ex_f = 0.0
-        self.ey_f = 0.0
-        self.alpha = 0.5  # low-pass filter coefficient
+    # ---------- Callbacks ----------
+    def _on_map(self, msg: OccupancyGrid):
+        self.map_msg = msg
+        if not self.logged_map_header:
+            mi = msg.info
+            xmin, ymin = mi.origin.position.x, mi.origin.position.y
+            xmax, ymax = xmin + mi.width*mi.resolution, ymin + mi.height*mi.resolution
+            self.get_logger().info(f"/map frame='{msg.header.frame_id}' res={mi.resolution:.3f} "
+                                   f"size={mi.width}x{mi.height} world_bounds=([{xmin:.2f},{xmax:.2f}], "
+                                   f"[{ymin:.2f},{ymax:.2f}])")
+            self.logged_map_header = True
 
-        self.get_logger().info('A* planner ready — click a 2D Goal Pose.')
+    def _on_goal(self, msg: PoseStamped):
+        if msg.header.frame_id != self.fixed_frame:
+            self.get_logger().warn(f"Goal must be in {self.fixed_frame}, got {msg.header.frame_id}")
+            return
+        self.goal_xy_world = (msg.pose.position.x, msg.pose.position.y)
+        self.goal_marker_pub.publish(self._make_goal_marker(self.goal_xy_world))
+        self.get_logger().info(f"Received goal: {self.goal_xy_world}")
 
-    # ---------------- map + goal callbacks ----------------
-    def on_map(self, msg: OccupancyGrid):
-        self.map_info = msg.info
-        self.map = np.asarray(msg.data, dtype=np.int16).reshape(msg.info.height, msg.info.width)
-
-    def on_goal(self, msg: PoseStamped):
-        self.goal = (msg.pose.position.x, msg.pose.position.y)
-        self.get_logger().info(f'New goal: {self.goal}')
-        self.plan_path()
-
-    # ---------------- path planning ----------------
-    def plan_path(self):
-        if self.map is None or self.map_info is None:
-            self.get_logger().warn('No map yet')
+    # ---------- Planning ----------
+    def _try_plan(self):
+        if self.map_msg is None or self.goal_xy_world is None:
             return
 
-        start = self.get_pose_in_map()
-        if start is None:
-            self.get_logger().warn('No TF yet')
+        start_xy = self._get_start_xy_world()
+        if start_xy is None:
+            return
+        sx, sy = start_xy
+        gx, gy = self.goal_xy_world
+
+        mi = self.map_msg.info
+        start_ij = self.world_to_grid(sx, sy)
+        goal_ij  = self.world_to_grid(gx, gy)
+
+        if start_ij is None or goal_ij is None:
+            self.get_logger().warn("Start or goal outside the known map extents.")
             return
 
-        sx, sy, _ = start
-        gx, gy = self.goal
-        s_g = self.world_to_grid(sx, sy)
-        g_g = self.world_to_grid(gx, gy)
+        si, sj = start_ij
+        gi, gj = goal_ij
+        start_cell = self.map_msg.data[si*mi.width + sj]
+        goal_cell  = self.map_msg.data[gi*mi.width + gj]
+        self.get_logger().info(f"indices start=({si},{sj}) val={start_cell}  goal=({gi},{gj}) val={goal_cell}")
 
-        if not self.in_bounds(*s_g) or not self.in_bounds(*g_g):
-            self.get_logger().warn('Start or goal out of bounds')
-            return
+        free_mask, unknown_mask = self._build_masks()
 
-        grid_free = self.inflate_obstacles(
-            self.map,
-            radius_cells=max(1, int(0.25 / self.map_info.resolution))
-        )
-        path_cells = self.astar(grid_free, s_g, g_g)
+        # Snap goal to nearest free if needed
+        if not free_mask[gi][gj]:
+            snapped = self._snap_goal_to_free((gi, gj), free_mask)
+            if snapped:
+                gi, gj = snapped
+                gx, gy = self.grid_to_world(gi, gj)
+                self.goal_xy_world = (gx, gy)
+                self.goal_marker_pub.publish(self._make_goal_marker(self.goal_xy_world))
+                self.get_logger().info(f"Goal snapped to free at indices=({gi},{gj}) world=({gx:.2f},{gy:.2f})")
+            else:
+                self.get_logger().warn("No nearby free cell for goal; planning aborted.")
+                return
+
+        path_cells = self._astar(free_mask, unknown_mask, start_ij, (gi, gj))
         if not path_cells:
-            self.get_logger().warn('No path found')
-            self.path_pts = []
-            self.publish_path([])
+            self.get_logger().warn("A* failed: no path.")
             return
 
-        pts = [self.grid_to_world(cx, cy) for (cy, cx) in path_cells]  # row-major
-        self.path_pts = self.sparsify(pts, step=2)
-        self.lookahead = max(0.4, 10 * self.map_info.resolution)
-        self.publish_path(self.path_pts)
+        xy_world = [self.grid_to_world(i, j) for (i, j) in path_cells]
+        self.path_pub.publish(self._make_path_msg(xy_world))
+        self.path_marker_pub.publish(self._make_sphere_list_marker(xy_world))
 
-    def astar(self, grid, start, goal):
-        H, W = grid.shape
-        sy, sx = start[1], start[0]
-        gy, gx = goal[1], goal[0]
-        if grid[sy, sx] or grid[gy, gx]:
+    # ---------- TF ----------
+    def _get_start_xy_world(self) -> Optional[Tuple[float,float]]:
+        try:
+            tf = self.tf_buffer.lookup_transform(self.fixed_frame, self.base_link, rclpy.time.Time())
+        except (LookupException, ExtrapolationException, ConnectivityException) as e:
+            self.get_logger().warn_throttle(2000, f"TF {self.fixed_frame}->{self.base_link} not ready: {e}")
+            return None
+        t = tf.transform.translation
+        return (t.x, t.y)
+
+    # ---------- Map conversions ----------
+    def world_to_grid(self, x: float, y: float) -> Optional[Tuple[int,int]]:
+        m = self.map_msg.info
+        j = int((x - m.origin.position.x) / m.resolution)
+        i = int((y - m.origin.position.y) / m.resolution)
+        if 0 <= i < m.height and 0 <= j < m.width:
+            return (i, j)
+        return None
+
+    def grid_to_world(self, i: int, j: int) -> Tuple[float,float]:
+        m = self.map_msg.info
+        x = m.origin.position.x + (j + 0.5) * m.resolution
+        y = m.origin.position.y + (i + 0.5) * m.resolution
+        return (x, y)
+
+    # ---------- Masks & inflation ----------
+    def _build_masks(self):
+        """Returns (free_mask, unknown_mask). free_mask[i][j]=True means traversable."""
+        data = self.map_msg.data
+        w = self.map_msg.info.width
+        h = self.map_msg.info.height
+        res = self.map_msg.info.resolution
+        rad_cells = int(max(0.0, self.inflate_radius) / res + 0.5)
+
+        free = [[True]*w for _ in range(h)]
+        unknown = [[False]*w for _ in range(h)]
+
+        for i in range(h):
+            for j in range(w):
+                v = data[i*w + j]
+                if v < 0:
+                    if self.unknown_policy == 'blocked':
+                        free[i][j] = False
+                    elif self.unknown_policy == 'free':
+                        free[i][j] = True
+                    else:  # penalized
+                        free[i][j] = True
+                        unknown[i][j] = True
+                else:
+                    free[i][j] = (v < self.occ_threshold)
+
+        if rad_cells > 0:
+            r2 = rad_cells * rad_cells
+            for i in range(h):
+                for j in range(w):
+                    v = data[i*w + j]
+                    is_occ = (v >= self.occ_threshold) if v >= 0 else (not self.inflate_ignore_unknown)
+                    if not is_occ:
+                        continue
+                    for di in range(-rad_cells, rad_cells+1):
+                        ii = i + di
+                        if ii < 0 or ii >= h: 
+                            continue
+                        # circle: di^2 + dj^2 <= r^2
+                        max_dj = int((r2 - di*di)**0.5)
+                        for dj in range(-max_dj, max_dj+1):
+                            jj = j + dj
+                            if 0 <= jj < w:
+                                free[ii][jj] = False
+        return free, unknown
+
+    # ---------- Goal snapping ----------
+    def _snap_goal_to_free(self, goal: Tuple[int,int], free_mask) -> Optional[Tuple[int,int]]:
+        gi, gj = goal
+        if free_mask[gi][gj]:
+            return goal
+        m = self.map_msg.info
+        max_cells = int(self.snap_goal_radius_m / m.resolution + 0.5)
+        visited = set([(gi, gj)])
+        q = deque([(gi, gj, 0)])
+        while q:
+            i, j, d = q.popleft()
+            if d > max_cells: 
+                break
+            if 0 <= i < m.height and 0 <= j < m.width and free_mask[i][j]:
+                return (i, j)
+            for di, dj, _ in neighbors_8(i, j):
+                ni, nj = di, dj  # careful: neighbors_8 already returns absolute indices when fed absolute…
+        # Correct neighbor expansion:
+        visited = set([(gi, gj)])
+        q = deque([(gi, gj, 0)])
+        while q:
+            i, j, d = q.popleft()
+            if d > max_cells:
+                break
+            if 0 <= i < m.height and 0 <= j < m.width and free_mask[i][j]:
+                return (i, j)
+            for oi, oj, _ in neighbors_8(0, 0):
+                ni, nj = i + oi, j + oj
+                if (ni, nj) not in visited:
+                    visited.add((ni, nj))
+                    q.append((ni, nj, d+1))
+        return None
+
+    # ---------- A* ----------
+    def _astar(self, free_mask, unknown_mask, start, goal):
+        h, w = len(free_mask), len(free_mask[0])
+        si, sj = start
+        gi, gj = goal
+        if not (0 <= si < h and 0 <= sj < w and 0 <= gi < h and 0 <= gj < w):
             return []
 
-        from heapq import heappush, heappop
+        if not free_mask[si][sj] or not free_mask[gi][gj]:
+            return []
 
-        def h(y, x):
-            dy, dx = abs(y - gy), abs(x - gx)
-            return max(dx, dy) + (math.sqrt(2) - 1) * min(dx, dy)
+        penalize = (self.unknown_policy == 'penalized')
+        unk_pen  = self.unknown_penalty
 
-        neigh = [(-1, 0), (1, 0), (0, -1), (0, 1),
-                 (-1, -1), (-1, 1), (1, -1), (1, 1)]
-        cost = {(0, 1): 1, (1, 0): 1, (0, 0): 1, (1, 1): math.sqrt(2)}
+        openq = []
+        heapq.heappush(openq, (0.0, start))
+        g_cost = {start: 0.0}
+        parent = {start: None}
+        closed = set()
 
-        openset = []
-        heappush(openset, (0.0, (sy, sx)))
-        gscore = {(sy, sx): 0.0}
-        parent = {(sy, sx): None}
+        while openq:
+            _, cur = heapq.heappop(openq)
+            if cur in closed:
+                continue
+            closed.add(cur)
 
-        while openset:
-            _, (cy, cx) = heappop(openset)
-            if (cy, cx) == (gy, gx):
+            if cur == goal:
                 path = []
-                cur = (cy, cx)
-                while cur is not None:
-                    path.append(cur)
-                    cur = parent[cur]
+                c = cur
+                while c is not None:
+                    path.append(c)
+                    c = parent[c]
                 return list(reversed(path))
 
-            for dy, dx in neigh:
-                ny, nx = cy + dy, cx + dx
-                if ny < 0 or nx < 0 or ny >= H or nx >= W:
+            ci, cj = cur
+            for di, dj, step in neighbors_8(0, 0):
+                ni, nj = ci + di, cj + dj
+                if not (0 <= ni < h and 0 <= nj < w):
                     continue
-                if grid[ny, nx]:
+                if not free_mask[ni][nj]:
                     continue
-                step = cost[(abs(dx), abs(dy))]
-                tentative = gscore[(cy, cx)] + step
-                if (ny, nx) not in gscore or tentative < gscore[(ny, nx)]:
-                    gscore[(ny, nx)] = tentative
-                    parent[(ny, nx)] = (cy, cx)
-                    heappush(openset, (tentative + h(ny, nx), (ny, nx)))
+                extra = (unk_pen if penalize and unknown_mask[ni][nj] else 0.0)
+                tentative = g_cost[cur] + step + extra
+                nxt = (ni, nj)
+                if nxt not in g_cost or tentative < g_cost[nxt]:
+                    g_cost[nxt] = tentative
+                    parent[nxt] = cur
+                    f = tentative + heuristic(nxt, goal)
+                    heapq.heappush(openq, (f, nxt))
         return []
 
-    # ---------------- holonomic controller ----------------
-    def control_step(self):
-        if not self.path_pts:
-            self.cmd_pub.publish(Twist())
-            return
-
-        pose = self.get_pose_in_map()
-        if pose is None:
-            self.cmd_pub.publish(Twist())
-            return
-
-        x, y, yaw = pose
-
-        final = self.path_pts[-1]
-        dist_goal = self.dist((x, y), final)
-
-        cell = self.map_info.resolution
-        capture_R  = max(0.40, 3 * cell)
-        approach_R = max(0.80, 8 * cell)
-
-        if dist_goal > approach_R:
-            target = final
-            for p in self.path_pts:
-                if self.dist((x, y), p) > self.lookahead:
-                    target = p
-                    break
-        else:
-            target = final
-
-        dx = target[0] - x
-        dy = target[1] - y
-        ex =  math.cos(yaw) * dx + math.sin(yaw) * dy
-        ey = -math.sin(yaw) * dx + math.cos(yaw) * dy
-
-        # low-pass on body-frame error
-        self.ex_f = self.alpha * ex + (1.0 - self.alpha) * self.ex_f
-        self.ey_f = self.alpha * ey + (1.0 - self.alpha) * self.ey_f
-        ex, ey = self.ex_f, self.ey_f
-
-        heading_err = math.atan2(ey, ex)
-
-        dead_xy = max(0.08, 1.5 * cell)
-        if abs(ex) < dead_xy:
-            ex = 0.0
-        if abs(ey) < dead_xy:
-            ey = 0.0
-
-        taper_R = 1.2
-        scale   = max(0.0, min(1.0, dist_goal / taper_R))
-
-        cmd = Twist()
-
-        if self.STRAFE_ENABLED:
-            k_pos_far  = 0.8
-            k_pos_near = 0.5
-
-            if dist_goal > approach_R:
-                kpos = k_pos_far
-                yaw_scale = max(0.25, scale)
-                wz = 0.35 * self.k_w * heading_err * yaw_scale
-            else:
-                kpos = k_pos_near
-                yaw_scale = max(0.2, scale)
-                wz = 0.28 * self.k_w * heading_err * yaw_scale
-
-            vx = kpos * ex * scale
-            vy = kpos * ey * scale
-
-            vx = max(-self.v_max, min(self.v_max, vx))
-            vy = max(-self.v_max, min(self.v_max, vy))
-            wz = max(-self.w_max, min(self.w_max, wz))
-
-            if abs(vx) < 0.03: vx = 0.0
-            if abs(vy) < 0.03: vy = 0.0
-            if abs(wz) < 0.03: wz = 0.0
-
-            cmd.linear.x  = vx
-            cmd.linear.y  = vy
-            cmd.angular.z = wz
-        else:
-            theta_spin = 1.0
-            if abs(heading_err) > theta_spin:
-                v = 0.0
-                w = max(-self.w_max, min(self.w_max, self.k_w * heading_err))
-            else:
-                v = max(0.0, min(self.v_max, self.k_v * ex * scale))
-                w = max(-self.w_max, min(self.w_max,
-                                         0.6 * self.k_w * heading_err * max(0.2, scale)))
-
-            if abs(v) < 0.03: v = 0.0
-            if abs(w) < 0.03: w = 0.0
-
-            cmd.linear.x  = v
-            cmd.angular.z = w
-
-        # goal capture
-        if dist_goal < capture_R:
-            self.cmd_pub.publish(Twist())
-            self.path_pts = []
-            return
-
-        self.cmd_pub.publish(cmd)
-
-    # ---------------- utils ----------------
-    def get_pose_in_map(self):
-        try:
-            tf = self.tf_buffer.lookup_transform(
-                self.map_frame,
-                self.base_link_frame,
-                rclpy.time.Time()
-            )
-            x = tf.transform.translation.x
-            y = tf.transform.translation.y
-            q = tf.transform.rotation
-            yaw = math.atan2(
-                2 * (q.w * q.z + q.x * q.y),
-                1 - 2 * (q.y * q.y + q.z * q.z)
-            )
-            return x, y, yaw
-        except (LookupException, ConnectivityException, ExtrapolationException):
-            return None
-
-    def publish_path(self, pts):
-        path = Path()
-        path.header = Header(
-            frame_id=self.map_frame,
-            stamp=self.get_clock().now().to_msg()
-        )
-        for (wx, wy) in pts:
+    # ---------- Viz ----------
+    def _make_path_msg(self, xy):
+        msg = Path()
+        msg.header.frame_id = self.fixed_frame
+        msg.header.stamp = self.get_clock().now().to_msg()
+        for x, y in xy:
             ps = PoseStamped()
-            ps.header = path.header
-            ps.pose.position.x = wx
-            ps.pose.position.y = wy
+            ps.header.frame_id = self.fixed_frame
+            ps.pose.position.x = float(x)
+            ps.pose.position.y = float(y)
             ps.pose.orientation.w = 1.0
-            path.poses.append(ps)
-        self.path_pub.publish(path)
+            msg.poses.append(ps)
+        return msg
 
-    def world_to_grid(self, wx, wy):
-        r  = self.map_info.resolution
-        ox = self.map_info.origin.position.x
-        oy = self.map_info.origin.position.y
-        return int((wx - ox) / r), int((wy - oy) / r)
+    def _make_sphere_list_marker(self, xy, ns="astar_path", mid=0, scale=0.08, rgba=(0.1,0.6,1.0,1.0)):
+        m = Marker()
+        m.header.frame_id = self.fixed_frame
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.ns, m.id = ns, mid
+        m.type = Marker.SPHERE_LIST
+        m.action = Marker.ADD
+        m.scale.x = m.scale.y = m.scale.z = scale
+        m.color.r, m.color.g, m.color.b, m.color.a = rgba
+        for x, y in xy:
+            p = Point(x=float(x), y=float(y), z=0.05)
+            m.points.append(p)
+        return m
 
-    def grid_to_world(self, gx, gy):
-        r  = self.map_info.resolution
-        ox = self.map_info.origin.position.x
-        oy = self.map_info.origin.position.y
-        return ox + (gx + 0.5) * r, oy + (gy + 0.5) * r
-
-    def in_bounds(self, gx, gy):
-        return 0 <= gx < self.map_info.width and 0 <= gy < self.map_info.height
-
-    def inflate_obstacles(self, raw_grid, radius_cells=3):
-        occ = (raw_grid == 100) | (raw_grid == -1)
-        H, W = occ.shape
-        dil = occ.copy()
-        r = radius_cells
-        if r <= 0:
-            return dil.astype(np.uint8)
-
-        pad = np.pad(occ, r, mode='edge')
-        for y in range(H):
-            for x in range(W):
-                window = pad[y:y + 2 * r + 1, x:x + 2 * r + 1]
-                if window.any():
-                    dil[y, x] = True
-        return dil.astype(np.uint8)
-
-    def sparsify(self, pts, step=2):
-        if not pts:
-            return pts
-        return [p for i, p in enumerate(pts) if i % step == 0] + [pts[-1]]
-
-    @staticmethod
-    def dist(a, b):
-        return math.hypot(a[0] - b[0], a[1] - b[1])
-
+    def _make_goal_marker(self, goal_xy, ns="astar_goal", mid=1, scale=0.25, rgba=(1.0,0.2,0.2,1.0)):
+        x, y = goal_xy
+        m = Marker()
+        m.header.frame_id = self.fixed_frame
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.ns, m.id = ns, mid
+        m.type = Marker.SPHERE
+        m.action = Marker.ADD
+        m.pose.position.x = float(x); m.pose.position.y = float(y); m.pose.position.z = 0.1
+        m.pose.orientation.w = 1.0
+        m.scale.x = m.scale.y = m.scale.z = scale
+        m.color.r, m.color.g, m.color.b, m.color.a = rgba
+        return m
 
 def main():
     rclpy.init()
     node = AStarPlanner()
-    try:
-        rclpy.spin(node)
-    finally:
-        node.cmd_pub.publish(Twist())
-        node.destroy_node()
-        rclpy.shutdown()
-
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
