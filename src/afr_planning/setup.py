@@ -22,6 +22,7 @@ setup(
     entry_points={
         'console_scripts': [
             'astar_planner = afr_planning.astar_planner:main',
+            'path_follower = afr_planning.path_follower:main',
         ],
     },
 )
