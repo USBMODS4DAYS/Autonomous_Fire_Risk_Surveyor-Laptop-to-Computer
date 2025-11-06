@@ -10,41 +10,51 @@ from visualization_msgs.msg import Marker
 from tf2_ros import Buffer, TransformListener, LookupException, ExtrapolationException, ConnectivityException
 from collections import deque
 
-def heuristic(a: Tuple[int,int], b: Tuple[int,int]) -> float:
-    return math.hypot(a[0]-b[0], a[1]-b[1])
+
+def heuristic(a: Tuple[int, int], b: Tuple[int, int]) -> float:
+    return math.hypot(a[0] - b[0], a[1] - b[1])
+
 
 def neighbors_8(i: int, j: int):
     rt2 = math.sqrt(2.0)
-    return [(i-1,j-1,rt2),(i-1,j,1.0),(i-1,j+1,rt2),
-            (i,  j-1,1.0),             (i,  j+1,1.0),
-            (i+1,j-1,rt2),(i+1,j,1.0),(i+1,j+1,rt2)]
+    return [
+        (i - 1, j - 1, rt2),
+        (i - 1, j, 1.0),
+        (i - 1, j + 1, rt2),
+        (i, j - 1, 1.0),
+        (i, j + 1, 1.0),
+        (i + 1, j - 1, rt2),
+        (i + 1, j, 1.0),
+        (i + 1, j + 1, rt2),
+    ]
+
 
 class AStarPlanner(Node):
     def __init__(self):
-        super().__init__('astar_planner')
+        super().__init__("astar_planner")
 
         # Frames / topics
-        self.fixed_frame = 'drone/map'
-        self.base_link   = 'drone_base_link'
-        self.map_topic   = '/map'          # slam_toolbox publishes /map (frame_id = drone/map)
-        self.goal_topic  = '/drone/goal'
+        self.fixed_frame = "drone/map"
+        self.base_link = "drone_base_link"
+        self.map_topic = "/map"  # slam_toolbox publishes /map (frame_id = drone/map)
+        self.goal_topic = "/drone/goal"
 
         # Params
-        self.declare_parameter('occ_threshold', 50)
-        self.declare_parameter('inflate_radius', 0.0)           # m
-        self.declare_parameter('plan_rate_hz', 1.0)
-        self.declare_parameter('unknown_policy', 'blocked')      # 'blocked' | 'free' | 'penalized'
-        self.declare_parameter('unknown_penalty', 2.0)           # extra cost per unknown step (if penalized)
-        self.declare_parameter('snap_goal_radius_m', 0.6)        # search radius to snap goal to nearest free
-        self.declare_parameter('inflate_ignore_unknown', True)   # ignore unknown for inflation
+        self.declare_parameter("occ_threshold", 50)
+        self.declare_parameter("inflate_radius", 0.0)  # m
+        self.declare_parameter("plan_rate_hz", 1.0)
+        self.declare_parameter("unknown_policy", "blocked")  # 'blocked' | 'free' | 'penalized'
+        self.declare_parameter("unknown_penalty", 2.0)  # extra cost per unknown step (if penalized)
+        self.declare_parameter("snap_goal_radius_m", 0.6)  # search radius to snap goal to nearest free
+        self.declare_parameter("inflate_ignore_unknown", True)  # ignore unknown for inflation
 
-        self.occ_threshold         = int(self.get_parameter('occ_threshold').value)
-        self.inflate_radius        = float(self.get_parameter('inflate_radius').value)
-        self.plan_period           = 1.0/float(self.get_parameter('plan_rate_hz').value)
-        self.unknown_policy        = str(self.get_parameter('unknown_policy').value)
-        self.unknown_penalty       = float(self.get_parameter('unknown_penalty').value)
-        self.snap_goal_radius_m    = float(self.get_parameter('snap_goal_radius_m').value)
-        self.inflate_ignore_unknown= bool(self.get_parameter('inflate_ignore_unknown').value)
+        self.occ_threshold = int(self.get_parameter("occ_threshold").value)
+        self.inflate_radius = float(self.get_parameter("inflate_radius").value)
+        self.plan_period = 1.0 / float(self.get_parameter("plan_rate_hz").value)
+        self.unknown_policy = str(self.get_parameter("unknown_policy").value)
+        self.unknown_penalty = float(self.get_parameter("unknown_penalty").value)
+        self.snap_goal_radius_m = float(self.get_parameter("snap_goal_radius_m").value)
+        self.inflate_ignore_unknown = bool(self.get_parameter("inflate_ignore_unknown").value)
 
         # TF
         self.tf_buffer = Buffer(cache_time=Duration(seconds=10.0))
@@ -53,17 +63,19 @@ class AStarPlanner(Node):
         # IO
         self.map_sub = self.create_subscription(OccupancyGrid, self.map_topic, self._on_map, 5)
         self.goal_sub = self.create_subscription(PoseStamped, self.goal_topic, self._on_goal, 5)
-        self.path_pub        = self.create_publisher(Path,   '/drone/astar_path',    10)
-        self.path_marker_pub = self.create_publisher(Marker, '/drone/astar_markers', 10)
-        self.goal_marker_pub = self.create_publisher(Marker, '/drone/goal_marker',   10)
+        self.path_pub = self.create_publisher(Path, "/drone/astar_path", 10)
+        self.path_marker_pub = self.create_publisher(Marker, "/drone/astar_markers", 10)
+        self.goal_marker_pub = self.create_publisher(Marker, "/drone/goal_marker", 10)
 
         # State
         self.map_msg: Optional[OccupancyGrid] = None
-        self.goal_xy_world: Optional[Tuple[float,float]] = None
+        self.goal_xy_world: Optional[Tuple[float, float]] = None
         self.logged_map_header = False
 
         self.create_timer(self.plan_period, self._try_plan)
-        self.get_logger().info("A* ready. Publish PoseStamped to /drone/goal with frame_id=drone/map.")
+        self.get_logger().info(
+            "A* ready. Publish PoseStamped to /drone/goal with frame_id=drone/map."
+        )
 
     # ---------- Callbacks ----------
     def _on_map(self, msg: OccupancyGrid):
@@ -71,15 +83,20 @@ class AStarPlanner(Node):
         if not self.logged_map_header:
             mi = msg.info
             xmin, ymin = mi.origin.position.x, mi.origin.position.y
-            xmax, ymax = xmin + mi.width*mi.resolution, ymin + mi.height*mi.resolution
-            self.get_logger().info(f"/map frame='{msg.header.frame_id}' res={mi.resolution:.3f} "
-                                   f"size={mi.width}x{mi.height} world_bounds=([{xmin:.2f},{xmax:.2f}], "
-                                   f"[{ymin:.2f},{ymax:.2f}])")
+            xmax = xmin + mi.width * mi.resolution
+            ymax = ymin + mi.height * mi.resolution
+            self.get_logger().info(
+                f"/map frame='{msg.header.frame_id}' res={mi.resolution:.3f} "
+                f"size={mi.width}x{mi.height} world_bounds=([{xmin:.2f},{xmax:.2f}], "
+                f"[{ymin:.2f},{ymax:.2f}])"
+            )
             self.logged_map_header = True
 
     def _on_goal(self, msg: PoseStamped):
         if msg.header.frame_id != self.fixed_frame:
-            self.get_logger().warn(f"Goal must be in {self.fixed_frame}, got {msg.header.frame_id}")
+            self.get_logger().warn(
+                f"Goal must be in {self.fixed_frame}, got {msg.header.frame_id}"
+            )
             return
         self.goal_xy_world = (msg.pose.position.x, msg.pose.position.y)
         self.goal_marker_pub.publish(self._make_goal_marker(self.goal_xy_world))
@@ -98,7 +115,7 @@ class AStarPlanner(Node):
 
         mi = self.map_msg.info
         start_ij = self.world_to_grid(sx, sy)
-        goal_ij  = self.world_to_grid(gx, gy)
+        goal_ij = self.world_to_grid(gx, gy)
 
         if start_ij is None or goal_ij is None:
             self.get_logger().warn("Start or goal outside the known map extents.")
@@ -106,24 +123,41 @@ class AStarPlanner(Node):
 
         si, sj = start_ij
         gi, gj = goal_ij
-        start_cell = self.map_msg.data[si*mi.width + sj]
-        goal_cell  = self.map_msg.data[gi*mi.width + gj]
-        self.get_logger().info(f"indices start=({si},{sj}) val={start_cell}  goal=({gi},{gj}) val={goal_cell}")
+        start_cell = self.map_msg.data[si * mi.width + sj]
+        goal_cell = self.map_msg.data[gi * mi.width + gj]
+        self.get_logger().info(
+            f"indices start=({si},{sj}) val={start_cell}  goal=({gi},{gj}) val={goal_cell}"
+        )
 
         free_mask, unknown_mask = self._build_masks()
 
         # Snap goal to nearest free if needed
         if not free_mask[gi][gj]:
             snapped = self._snap_goal_to_free((gi, gj), free_mask)
-            if snapped:
+            if snapped is not None:
                 gi, gj = snapped
                 gx, gy = self.grid_to_world(gi, gj)
                 self.goal_xy_world = (gx, gy)
                 self.goal_marker_pub.publish(self._make_goal_marker(self.goal_xy_world))
-                self.get_logger().info(f"Goal snapped to free at indices=({gi},{gj}) world=({gx:.2f},{gy:.2f})")
+                self.get_logger().info(
+                    f"Goal snapped to free at indices=({gi},{gj}) world=({gx:.2f},{gy:.2f})"
+                )
             else:
-                self.get_logger().warn("No nearby free cell for goal; planning aborted.")
-                return
+                # NEW: fall back to "last free cell along the ray" from start to goal
+                ray_target = self._last_free_along_ray(start_ij, (gi, gj), free_mask)
+                if ray_target is None:
+                    self.get_logger().warn(
+                        "No nearby free cell for goal and no free cell along ray; planning aborted."
+                    )
+                    return
+                gi, gj = ray_target
+                gx, gy = self.grid_to_world(gi, gj)
+                self.goal_xy_world = (gx, gy)
+                self.goal_marker_pub.publish(self._make_goal_marker(self.goal_xy_world))
+                self.get_logger().info(
+                    f"Goal in unknown/blocked area; planning to closest visible point "
+                    f"at indices=({gi},{gj}) world=({gx:.2f},{gy:.2f})"
+                )
 
         path_cells = self._astar(free_mask, unknown_mask, start_ij, (gi, gj))
         if not path_cells:
@@ -135,17 +169,21 @@ class AStarPlanner(Node):
         self.path_marker_pub.publish(self._make_sphere_list_marker(xy_world))
 
     # ---------- TF ----------
-    def _get_start_xy_world(self) -> Optional[Tuple[float,float]]:
+    def _get_start_xy_world(self) -> Optional[Tuple[float, float]]:
         try:
-            tf = self.tf_buffer.lookup_transform(self.fixed_frame, self.base_link, rclpy.time.Time())
+            tf = self.tf_buffer.lookup_transform(
+                self.fixed_frame, self.base_link, rclpy.time.Time()
+            )
         except (LookupException, ExtrapolationException, ConnectivityException) as e:
-            self.get_logger().warn_throttle(2000, f"TF {self.fixed_frame}->{self.base_link} not ready: {e}")
+            self.get_logger().warn_throttle(
+                2000, f"TF {self.fixed_frame}->{self.base_link} not ready: {e}"
+            )
             return None
         t = tf.transform.translation
         return (t.x, t.y)
 
     # ---------- Map conversions ----------
-    def world_to_grid(self, x: float, y: float) -> Optional[Tuple[int,int]]:
+    def world_to_grid(self, x: float, y: float) -> Optional[Tuple[int, int]]:
         m = self.map_msg.info
         j = int((x - m.origin.position.x) / m.resolution)
         i = int((y - m.origin.position.y) / m.resolution)
@@ -153,7 +191,7 @@ class AStarPlanner(Node):
             return (i, j)
         return None
 
-    def grid_to_world(self, i: int, j: int) -> Tuple[float,float]:
+    def grid_to_world(self, i: int, j: int) -> Tuple[float, float]:
         m = self.map_msg.info
         x = m.origin.position.x + (j + 0.5) * m.resolution
         y = m.origin.position.y + (i + 0.5) * m.resolution
@@ -168,75 +206,120 @@ class AStarPlanner(Node):
         res = self.map_msg.info.resolution
         rad_cells = int(max(0.0, self.inflate_radius) / res + 0.5)
 
-        free = [[True]*w for _ in range(h)]
-        unknown = [[False]*w for _ in range(h)]
+        free = [[True] * w for _ in range(h)]
+        unknown = [[False] * w for _ in range(h)]
 
         for i in range(h):
             for j in range(w):
-                v = data[i*w + j]
+                v = data[i * w + j]
                 if v < 0:
-                    if self.unknown_policy == 'blocked':
+                    if self.unknown_policy == "blocked":
                         free[i][j] = False
-                    elif self.unknown_policy == 'free':
+                    elif self.unknown_policy == "free":
                         free[i][j] = True
                     else:  # penalized
                         free[i][j] = True
                         unknown[i][j] = True
                 else:
-                    free[i][j] = (v < self.occ_threshold)
+                    free[i][j] = v < self.occ_threshold
 
         if rad_cells > 0:
             r2 = rad_cells * rad_cells
             for i in range(h):
                 for j in range(w):
-                    v = data[i*w + j]
-                    is_occ = (v >= self.occ_threshold) if v >= 0 else (not self.inflate_ignore_unknown)
+                    v = data[i * w + j]
+                    is_occ = (v >= self.occ_threshold) if v >= 0 else (
+                        not self.inflate_ignore_unknown
+                    )
                     if not is_occ:
                         continue
-                    for di in range(-rad_cells, rad_cells+1):
+                    for di in range(-rad_cells, rad_cells + 1):
                         ii = i + di
-                        if ii < 0 or ii >= h: 
+                        if ii < 0 or ii >= h:
                             continue
-                        # circle: di^2 + dj^2 <= r^2
-                        max_dj = int((r2 - di*di)**0.5)
-                        for dj in range(-max_dj, max_dj+1):
+                        max_dj = int((r2 - di * di) ** 0.5)
+                        for dj in range(-max_dj, max_dj + 1):
                             jj = j + dj
                             if 0 <= jj < w:
                                 free[ii][jj] = False
         return free, unknown
 
     # ---------- Goal snapping ----------
-    def _snap_goal_to_free(self, goal: Tuple[int,int], free_mask) -> Optional[Tuple[int,int]]:
+    def _snap_goal_to_free(
+        self, goal: Tuple[int, int], free_mask
+    ) -> Optional[Tuple[int, int]]:
         gi, gj = goal
-        if free_mask[gi][gj]:
-            return goal
         m = self.map_msg.info
+        if 0 <= gi < m.height and 0 <= gj < m.width and free_mask[gi][gj]:
+            return goal
+
         max_cells = int(self.snap_goal_radius_m / m.resolution + 0.5)
         visited = set([(gi, gj)])
         q = deque([(gi, gj, 0)])
-        while q:
-            i, j, d = q.popleft()
-            if d > max_cells: 
-                break
-            if 0 <= i < m.height and 0 <= j < m.width and free_mask[i][j]:
-                return (i, j)
-            for di, dj, _ in neighbors_8(i, j):
-                ni, nj = di, dj  # careful: neighbors_8 already returns absolute indices when fed absolute…
-        # Correct neighbor expansion:
-        visited = set([(gi, gj)])
-        q = deque([(gi, gj, 0)])
+
         while q:
             i, j, d = q.popleft()
             if d > max_cells:
-                break
+                continue
             if 0 <= i < m.height and 0 <= j < m.width and free_mask[i][j]:
                 return (i, j)
-            for oi, oj, _ in neighbors_8(0, 0):
-                ni, nj = i + oi, j + oj
+            for di, dj, _ in neighbors_8(0, 0):
+                ni, nj = i + di, j + dj
                 if (ni, nj) not in visited:
                     visited.add((ni, nj))
-                    q.append((ni, nj, d+1))
+                    q.append((ni, nj, d + 1))
         return None
+
+    def _last_free_along_ray(
+        self, start: Tuple[int, int], goal: Tuple[int, int], free_mask
+    ) -> Optional[Tuple[int, int]]:
+        """
+        Walk a line from start -> goal in grid space and return the last free
+        cell before we hit a blocked cell or go out of bounds.
+        Uses Bresenham in (col,row) = (j,i) space.
+        """
+        h = len(free_mask)
+        w = len(free_mask[0])
+        si, sj = start
+        gi, gj = goal
+
+        # convert to (x,y) = (col,row)
+        x0, y0 = sj, si
+        x1, y1 = gj, gi
+
+        dx = abs(x1 - x0)
+        dy = abs(y1 - y0)
+        sx = 1 if x1 >= x0 else -1
+        sy = 1 if y1 >= y0 else -1
+
+        err = dx - dy
+        x, y = x0, y0
+        last_free = None
+
+        while True:
+            if 0 <= y < h and 0 <= x < w:
+                if free_mask[y][x]:
+                    last_free = (y, x)
+                else:
+                    break
+            else:
+                break
+
+            if x == x1 and y == y1:
+                break
+
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                x += sx
+            if e2 < dx:
+                err += dx
+                y += sy
+
+        # Avoid returning the start cell as a "goal"
+        if last_free is None or last_free == start:
+            return None
+        return last_free
 
     # ---------- A* ----------
     def _astar(self, free_mask, unknown_mask, start, goal):
@@ -249,8 +332,8 @@ class AStarPlanner(Node):
         if not free_mask[si][sj] or not free_mask[gi][gj]:
             return []
 
-        penalize = (self.unknown_policy == 'penalized')
-        unk_pen  = self.unknown_penalty
+        penalize = self.unknown_policy == "penalized"
+        unk_pen = self.unknown_penalty
 
         openq = []
         heapq.heappush(openq, (0.0, start))
@@ -279,7 +362,7 @@ class AStarPlanner(Node):
                     continue
                 if not free_mask[ni][nj]:
                     continue
-                extra = (unk_pen if penalize and unknown_mask[ni][nj] else 0.0)
+                extra = unk_pen if penalize and unknown_mask[ni][nj] else 0.0
                 tentative = g_cost[cur] + step + extra
                 nxt = (ni, nj)
                 if nxt not in g_cost or tentative < g_cost[nxt]:
@@ -303,7 +386,9 @@ class AStarPlanner(Node):
             msg.poses.append(ps)
         return msg
 
-    def _make_sphere_list_marker(self, xy, ns="astar_path", mid=0, scale=0.08, rgba=(0.1,0.6,1.0,1.0)):
+    def _make_sphere_list_marker(
+        self, xy, ns="astar_path", mid=0, scale=0.08, rgba=(0.1, 0.6, 1.0, 1.0)
+    ):
         m = Marker()
         m.header.frame_id = self.fixed_frame
         m.header.stamp = self.get_clock().now().to_msg()
@@ -317,7 +402,9 @@ class AStarPlanner(Node):
             m.points.append(p)
         return m
 
-    def _make_goal_marker(self, goal_xy, ns="astar_goal", mid=1, scale=0.25, rgba=(1.0,0.2,0.2,1.0)):
+    def _make_goal_marker(
+        self, goal_xy, ns="astar_goal", mid=1, scale=0.25, rgba=(1.0, 0.2, 0.2, 1.0)
+    ):
         x, y = goal_xy
         m = Marker()
         m.header.frame_id = self.fixed_frame
@@ -325,11 +412,14 @@ class AStarPlanner(Node):
         m.ns, m.id = ns, mid
         m.type = Marker.SPHERE
         m.action = Marker.ADD
-        m.pose.position.x = float(x); m.pose.position.y = float(y); m.pose.position.z = 0.1
+        m.pose.position.x = float(x)
+        m.pose.position.y = float(y)
+        m.pose.position.z = 0.1
         m.pose.orientation.w = 1.0
         m.scale.x = m.scale.y = m.scale.z = scale
         m.color.r, m.color.g, m.color.b, m.color.a = rgba
         return m
+
 
 def main():
     rclpy.init()
@@ -338,5 +428,6 @@ def main():
     node.destroy_node()
     rclpy.shutdown()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

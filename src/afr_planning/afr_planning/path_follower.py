@@ -29,7 +29,7 @@ class PathFollower(Node):
         self.declare_parameter("max_lin_speed", 0.4)
         self.declare_parameter("max_ang_speed", 0.8)
         self.declare_parameter("look_ahead_dist", 0.6)
-        self.declare_parameter("goal_tolerance", 0.3)
+        self.declare_parameter("goal_tolerance", 0.6)
         self.declare_parameter("control_rate_hz", 20.0)
 
         self.max_lin_speed = float(self.get_parameter("max_lin_speed").value)

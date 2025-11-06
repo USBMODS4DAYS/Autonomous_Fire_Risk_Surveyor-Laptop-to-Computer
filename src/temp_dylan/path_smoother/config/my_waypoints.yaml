@@ -1,0 +1,6 @@
+# ~/41068_ws/src/path_smoother/config/my_waypoints.yaml
+waypoints:
+  - [1.5, -0.5]
+  - [2.0, -1.5]
+  - [1.0, -2.5]
+  - [0.0, 0.0]

@@ -1,0 +1,4 @@
+0 Trees
+1 Rocks
+2 Platypus
+3 Hotspot

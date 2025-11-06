@@ -41,20 +41,17 @@ class FrontierExplorer(Node):
 
         self.declare_parameter("goal_altitude", 3.0)
         self.declare_parameter("min_frontier_size", 15)
-        self.declare_parameter("goal_reached_dist", 0.5)
+
+        # 🔧 Increased tolerance (was 0.5 → now 1.0)
+        self.declare_parameter("goal_reached_dist", 1.0)
+
         self.declare_parameter("timer_period", 1.0)
-
-        # Filtering / tuning
-        self.declare_parameter("min_frontier_distance", 1.0)   # metres (float)
-        self.declare_parameter("frontier_clearance_cells", 2)  # grid cells from obstacles
-        self.declare_parameter("occ_threshold", 50)            # occupancy threshold for "obstacle"
-
-        # Information gain filter (skip dead-end frontiers)
-        self.declare_parameter("unknown_gain_radius_cells", 6)  # radius around cluster centroid (cells)
-        self.declare_parameter("min_unknown_gain", 40)          # minimum unknown cells in that radius
-
-        # Path cost penalty: discourage flying over already-known space
-        self.declare_parameter("known_path_penalty_cells", 5.0)  # weight in "cells" to penalise known path
+        self.declare_parameter("min_frontier_distance", 1.0)
+        self.declare_parameter("frontier_clearance_cells", 2)
+        self.declare_parameter("occ_threshold", 50)
+        self.declare_parameter("unknown_gain_radius_cells", 6)
+        self.declare_parameter("min_unknown_gain", 40)
+        self.declare_parameter("known_path_penalty_cells", 5.0)
 
         map_topic = self.get_parameter("map_topic").value
         goal_topic = self.get_parameter("goal_topic").value
@@ -77,8 +74,6 @@ class FrontierExplorer(Node):
         self.state: str = "IDLE"
         self.last_goal_send_time: Optional[Time] = None
         self.max_goal_time = Duration(seconds=60.0)
-
-        # Have we successfully sent at least one goal yet?
         self.ever_sent_goal = False
 
         timer_period = self.get_parameter("timer_period").value
@@ -140,7 +135,9 @@ class FrontierExplorer(Node):
         tol = self.get_parameter("goal_reached_dist").value
         dx = robot_pose.pose.position.x - self.current_goal.pose.position.x
         dy = robot_pose.pose.position.y - self.current_goal.pose.position.y
-        return math.hypot(dx, dy) < tol
+        dist = math.hypot(dx, dy)
+        self.get_logger().info(f"Frontier reached check: dist={dist:.2f}, tol={tol:.2f}")
+        return dist < tol
 
     def goal_timed_out(self) -> bool:
         if self.last_goal_send_time is None:

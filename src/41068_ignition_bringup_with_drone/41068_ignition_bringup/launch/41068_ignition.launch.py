@@ -155,7 +155,7 @@ def generate_launch_description():
         executable='create',
         output='screen',
         arguments=['-topic', '/drone/robot_description',
-                   '-name', 'drone', '-x', '1.0', '-y', '0.0', '-z', '2.0']
+                   '-name', 'drone', '-x', '1.0', '-y', '0.0', '-z', '1.0']
     )
     ld.add_action(drone_spawner)
 
