@@ -318,7 +318,7 @@ Visualization Manager:
       Enabled: true
       Name: fronteir_markers
       Namespaces:
-        frontiers: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -330,7 +330,7 @@ Visualization Manager:
       Enabled: true
       Name: frontier_target
       Namespaces:
-        frontier_target: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -499,5 +499,5 @@ Window Geometry:
   Views:
     collapsed: false
   Width: 1200
-  X: 577
-  Y: 57
+  X: 545
+  Y: 25
