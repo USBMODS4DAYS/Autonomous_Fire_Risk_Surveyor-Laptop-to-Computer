@@ -16,188 +16,170 @@ from tf2_ros import (
     ConnectivityException,
 )
 
-# ---------- small helpers ----------
-
-def angle_wrap(a: float) -> float:
-    """Wrap angle to [-pi, pi]."""
-    while a > math.pi:
-        a -= 2.0 * math.pi
-    while a < -math.pi:
-        a += 2.0 * math.pi
-    return a
-
-
-def yaw_from_quaternion(x, y, z, w) -> float:
-    """Extract yaw (around Z) from a quaternion."""
-    # standard yaw formula
-    siny_cosp = 2.0 * (w * z + x * y)
-    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-    return math.atan2(siny_cosp, cosy_cosp)
-
 
 class PathFollower(Node):
     def __init__(self):
         super().__init__("path_follower")
 
-        # Frames / topics
-        self.map_frame = "drone/map"
-        self.base_frame = "drone_base_link"
-        self.cmd_vel_topic = "/drone/cmd_vel"
-        self.path_topic = "/drone/astar_path"
+        # Frames
+        self.fixed_frame = "drone/map"
+        self.base_link = "drone_base_link"
 
-        # Parameters (you can tweak from command line later)
-        self.declare_parameter("control_rate_hz", 20.0)
+        # Parameters
+        self.declare_parameter("max_lin_speed", 0.4)
+        self.declare_parameter("max_ang_speed", 0.8)
         self.declare_parameter("look_ahead_dist", 0.6)
-        self.declare_parameter("max_lin_speed", 0.6)
-        self.declare_parameter("max_ang_speed", 1.0)
-        self.declare_parameter("goal_xy_tolerance", 0.2)
-        self.declare_parameter("yaw_tolerance", 0.1)
+        self.declare_parameter("goal_tolerance", 0.3)
+        self.declare_parameter("control_rate_hz", 20.0)
 
-        self.control_dt = 1.0 / float(self.get_parameter("control_rate_hz").value)
-        self.look_ahead = float(self.get_parameter("look_ahead_dist").value)
-        self.max_v = float(self.get_parameter("max_lin_speed").value)
-        self.max_w = float(self.get_parameter("max_ang_speed").value)
-        self.goal_tol = float(self.get_parameter("goal_xy_tolerance").value)
-        self.yaw_tol = float(self.get_parameter("yaw_tolerance").value)
+        self.max_lin_speed = float(self.get_parameter("max_lin_speed").value)
+        self.max_ang_speed = float(self.get_parameter("max_ang_speed").value)
+        self.look_ahead_dist = float(self.get_parameter("look_ahead_dist").value)
+        self.goal_tolerance = float(self.get_parameter("goal_tolerance").value)
+        self.control_period = 1.0 / float(
+            self.get_parameter("control_rate_hz").value
+        )
 
-        # TF buffer / listener
+        # TF
         self.tf_buffer = Buffer(cache_time=Duration(seconds=10.0))
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        # Sub / pub
-        self.path_sub = self.create_subscription(Path, self.path_topic, self._on_path, 10)
-        self.cmd_pub = self.create_publisher(Twist, self.cmd_vel_topic, 10)
+        # IO
+        self.cmd_pub = self.create_publisher(Twist, "/drone/cmd_vel", 10)
+        self.path_sub = self.create_subscription(
+            Path, "/drone/astar_path", self._on_path, 10
+        )
 
-        # Internal state
-        self.current_path: List[Tuple[float, float]] = []
+        # State
+        self.path: List[Tuple[float, float]] = []
         self.goal_xy: Optional[Tuple[float, float]] = None
-        self.current_wp_idx: int = 0
-        self.active: bool = False
 
-        # Control timer
-        self.timer = self.create_timer(self.control_dt, self._control_loop)
+        # Control loop timer
+        self.timer = self.create_timer(self.control_period, self._control_loop)
 
         self.get_logger().info(
             "Path follower ready. It will follow /drone/astar_path using /drone/cmd_vel."
         )
 
-    # ---------- path callback ----------
+    # -------- Path callback --------
     def _on_path(self, msg: Path):
-        if not msg.poses:
-            self.get_logger().warn("Received empty path, stopping.")
-            self.current_path = []
-            self.goal_xy = None
-            self.active = False
-            self._publish_zero()
-            return
-
-        self.current_path = [
-            (p.pose.position.x, p.pose.position.y) for p in msg.poses
-        ]
-        self.goal_xy = self.current_path[-1]
-        self.current_wp_idx = 0
-        self.active = True
+        pts: List[Tuple[float, float]] = []
+        for ps in msg.poses:
+            pts.append((ps.pose.position.x, ps.pose.position.y))
+        self.path = pts
+        self.goal_xy = pts[-1] if pts else None
 
         self.get_logger().info(
-            f"New path received: {len(self.current_path)} points. "
-            f"Goal = ({self.goal_xy[0]:.2f}, {self.goal_xy[1]:.2f})"
+            f"New path received: {len(self.path)} points. Goal = {self.goal_xy}"
         )
 
-    # ---------- control loop ----------
-    def _control_loop(self):
-        if not self.active or not self.current_path:
-            # nothing to do
-            return
-
-        # Get pose of drone in map frame
-        pose = self._get_pose()
-        if pose is None:
-            self._publish_zero()
-            return
-
-        x, y, yaw = pose
-
-        # Check if we are at goal
-        gx, gy = self.goal_xy
-        dist_to_goal = math.hypot(gx - x, gy - y)
-        if dist_to_goal < self.goal_tol:
-            # close enough → stop
-            self.get_logger().info("Reached goal (within tolerance), stopping.")
-            self.active = False
-            self._publish_zero()
-            return
-
-
-        # Choose a look-ahead target on the path
-        target_idx = self.current_wp_idx
-        best_idx = target_idx
-        best_dist = 0.0
-
-        for i in range(self.current_wp_idx, len(self.current_path)):
-            px, py = self.current_path[i]
-            d = math.hypot(px - x, py - y)
-            if d < self.look_ahead:
-                best_idx = i
-                best_dist = d
-            else:
-                # first point beyond lookahead distance – good carrot
-                best_idx = i
-                best_dist = d
-                break
-
-        self.current_wp_idx = best_idx
-        tx, ty = self.current_path[best_idx]
-
-        # Heading to target
-        target_yaw = math.atan2(ty - y, tx - x)
-        yaw_err = angle_wrap(target_yaw - yaw)
-
-        # Simple P controller
-        k_v = 0.8
-        k_w = 1.5
-
-        # If yaw error large, rotate in place first
-        twist = Twist()
-        if abs(yaw_err) > self.yaw_tol * 3.0:
-            twist.linear.x = 0.0
-            twist.angular.z = max(-self.max_w, min(self.max_w, k_w * yaw_err))
-        else:
-            # Move forward with some speed, scaled by distance & heading
-            v = k_v * best_dist * math.cos(yaw_err)
-            v = max(0.0, min(self.max_v, v))
-            w = k_w * yaw_err
-            w = max(-self.max_w, min(self.max_w, w))
-
-            twist.linear.x = v
-            twist.angular.z = w
-
-        self.cmd_pub.publish(twist)
-
-    # ---------- helpers ----------
-    def _get_pose(self) -> Optional[Tuple[float, float, float]]:
+    # -------- TF helper --------
+    def _get_pose_map(self) -> Optional[Tuple[float, float, float]]:
         try:
             tf = self.tf_buffer.lookup_transform(
-                self.map_frame,
-                self.base_frame,
-                rclpy.time.Time(),
+                self.fixed_frame, self.base_link, rclpy.time.Time()
             )
         except (LookupException, ExtrapolationException, ConnectivityException) as e:
-            self.get_logger().warn_throttle(
-                2000, f"TF {self.map_frame}->{self.base_frame} not ready: {e}"
-            )
+            self.get_logger().warn(f"TF {self.fixed_frame}->{self.base_link} not ready: {e}")
             return None
 
         t = tf.transform.translation
-        r = tf.transform.rotation
-        yaw = yaw_from_quaternion(r.x, r.y, r.z, r.w)
+        q = tf.transform.rotation
+
+        # yaw from quaternion
+        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+
         return (t.x, t.y, yaw)
 
-    def _publish_zero(self):
-        self.cmd_pub.publish(Twist())
+    # -------- Control loop --------
+    def _control_loop(self):
+        # No path: stop
+        if not self.path or self.goal_xy is None:
+            self._publish_cmd(0.0, 0.0)
+            return
+
+        pose = self._get_pose_map()
+        if pose is None:
+            self._publish_cmd(0.0, 0.0)
+            return
+        x, y, yaw = pose
+
+        # Check goal reached
+        gx, gy = self.goal_xy
+        dist_goal = math.hypot(gx - x, gy - y)
+        if dist_goal < self.goal_tolerance:
+            self._publish_cmd(0.0, 0.0)
+            return
+
+        # Find lookahead target on path
+        target = self._find_lookahead(x, y)
+        if target is None:
+            self._publish_cmd(0.0, 0.0)
+            return
+        tx, ty = target
+
+        # Vector from robot to target in map frame
+        dx = tx - x
+        dy = ty - y
+
+        # Transform into base_link frame (rotate by -yaw)
+        dx_b = math.cos(-yaw) * dx - math.sin(-yaw) * dy
+        dy_b = math.sin(-yaw) * dx + math.cos(-yaw) * dy
+
+        angle_to_target = math.atan2(dy_b, dx_b)
+
+        # Forward speed proportional to how "in front" the target is
+        v = self.max_lin_speed * math.cos(angle_to_target)
+        if v < 0.0:
+            v = 0.0  # don't drive backwards
+
+        # Turn towards target
+        omega = 2.0 * angle_to_target  # simple gain
+
+        # Clamp speeds
+        v = max(-self.max_lin_speed, min(self.max_lin_speed, v))
+        omega = max(-self.max_ang_speed, min(self.max_ang_speed, omega))
+
+        self._publish_cmd(v, omega)
+
+    def _find_lookahead(self, x: float, y: float) -> Optional[Tuple[float, float]]:
+        if not self.path:
+            return None
+
+        # Find closest point on path
+        best_idx = 0
+        best_d2 = float("inf")
+        for i, (px, py) in enumerate(self.path):
+            d2 = (px - x) ** 2 + (py - y) ** 2
+            if d2 < best_d2:
+                best_d2 = d2
+                best_idx = i
+
+        # Walk forward until we've accumulated look_ahead_dist
+        accum = 0.0
+        last_x, last_y = self.path[best_idx]
+        for j in range(best_idx + 1, len(self.path)):
+            px, py = self.path[j]
+            step = math.hypot(px - last_x, py - last_y)
+            accum += step
+            if accum >= self.look_ahead_dist:
+                return (px, py)
+            last_x, last_y = px, py
+
+        # If path is too short, just aim at final goal
+        return self.path[-1]
+
+    def _publish_cmd(self, v: float, omega: float):
+        msg = Twist()
+        msg.linear.x = float(v)
+        msg.angular.z = float(omega)
+        self.cmd_pub.publish(msg)
 
 
-def main():
-    rclpy.init()
+def main(args=None):
+    rclpy.init(args=args)
     node = PathFollower()
     rclpy.spin(node)
     node.destroy_node()
