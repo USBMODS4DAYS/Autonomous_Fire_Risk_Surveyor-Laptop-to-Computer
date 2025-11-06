@@ -67,6 +67,25 @@ Now install this package:
 * You can also drive the robot using keyboard teleoperation by running the following in a separate terminal, then use the keys listed in the instructions to move the robot:
   ```bash
   ros2 run teleop_twist_keyboard teleop_twist_keyboard
+
+  ros2 launch 41068_ignition_bringup 41068_ignition.launch.py rviz:=true nav2:=true world:=large_demo
+
+  ros2 run afr_planning astar_planner --ros-args   -p unknown_policy:=penalized   -p unknown_penalty:=2.0   -p inflate_radius:=0.5   -p inflate_ignore_unknown:=true   -p occ_threshold:=60   -p plan_rate_hz:=2.0
+
+  ros2 run afr_planning path_follower
+
+  ros2 run afr_planning frontier_explorer
+
+  ros2 topic pub /drone/goal geometry_msgs/PoseStamped "
+header:
+  frame_id: 'drone/map'
+pose:
+  position: {x: 3.0, y: 0, z: 0.0}
+  orientation: {w: 1.0}
+" -1
+
+
+
   ```
 
 ## Drone (added 05/09/2025)
